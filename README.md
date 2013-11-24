@@ -3,6 +3,10 @@ msc
 
 Project moved from google code: https://code.google.com/p/msc-coder/
 
+Project contains helper utilities for my Master's degree thesis project. For more details please visit:
+
+http://ogorkis.net/education/msc/
+
 Applying FFmpeg patch
 ---------------------
 
