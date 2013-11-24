@@ -1,0 +1,327 @@
+diff --git a/ffmpeg.c b/ffmpeg.c
+index 0abed0c..ed7d6d2 100644
+--- a/ffmpeg.c
++++ b/ffmpeg.c
+@@ -174,6 +174,10 @@ static unsigned int allocated_audio_buf_size;
+ static uint8_t *async_buf;
+ static unsigned int allocated_async_buf_size;
+ 
++static int msc_boolean = 0;
++static float msc_float = 0.0f;
++static int msc_flags = 0;
++
+ #define DEFAULT_PASS_LOGFILENAME_PREFIX "ffmpeg2pass"
+ 
+ typedef struct InputFilter {
+@@ -4626,6 +4630,10 @@ static OutputStream *new_video_stream(OptionsContext *o, AVFormatContext *oc, in
+             }
+         }
+ 
++        video_enc->msc_boolean = msc_boolean;
++        video_enc->msc_float = msc_float;
++        video_enc->msc_flags = msc_flags;
++
+         MATCH_PER_STREAM_OPT(forced_key_frames, str, forced_key_frames, oc, st);
+         if (forced_key_frames)
+             parse_forced_key_frames(forced_key_frames, ost);
+@@ -5426,6 +5434,21 @@ static int opt_vstats_file(const char *opt, const char *arg)
+     return 0;
+ }
+ 
++static int opt_msc_custom(OptionsContext *o, const char *opt, const char *arg)
++{
++    if (!strncmp(arg, "custom1", 7)) {
++    	msc_flags = 1;
++    }
++    else if (!strncmp(arg, "custom2", 7)) {
++    	msc_flags = 2;
++    }
++    else {
++    	av_log(NULL, AV_LOG_ERROR, "Invalid msc custom property: %s\n", arg);
++    	return AVERROR(EINVAL);
++    }
++    return 0;
++}
++
+ static int opt_vstats(const char *opt, const char *arg)
+ {
+     char filename[40];
+@@ -5726,6 +5749,9 @@ static const OptionDef options[] = {
+     { "streamid", HAS_ARG | OPT_EXPERT | OPT_FUNC2, {(void*)opt_streamid}, "set the value of an outfile streamid", "streamIndex:value" },
+     { "force_key_frames", OPT_STRING | HAS_ARG | OPT_EXPERT | OPT_VIDEO | OPT_SPEC, {.off = OFFSET(forced_key_frames)}, "force key frames at specified timestamps", "timestamps" },
+     { "b", HAS_ARG | OPT_VIDEO | OPT_FUNC2, {(void*)opt_bitrate}, "video bitrate (please use -b:v)", "bitrate" },
++    { "msc_bool", OPT_BOOL | OPT_EXPERT | OPT_VIDEO, {(void*)&msc_boolean}, "msc coder boolean property" },
++    { "msc_float", HAS_ARG | OPT_FLOAT | OPT_EXPERT | OPT_VIDEO, {(void*)&msc_float}, "msc coder float property", "flaot value" },
++    { "msc_custom", HAS_ARG | OPT_EXPERT | OPT_VIDEO | OPT_FUNC2, {(void*)opt_msc_custom}, "msc coder custom property", "property" },
+ 
+     /* audio options */
+     { "aframes", HAS_ARG | OPT_AUDIO | OPT_FUNC2, {(void*)opt_audio_frames}, "set the number of audio frames to record", "number" },
+diff --git a/libavcodec/Makefile b/libavcodec/Makefile
+index e336917..e4df17c 100644
+--- a/libavcodec/Makefile
++++ b/libavcodec/Makefile
+@@ -505,6 +505,9 @@ OBJS-$(CONFIG_ZLIB_ENCODER)            += lclenc.o
+ OBJS-$(CONFIG_ZMBV_DECODER)            += zmbv.o
+ OBJS-$(CONFIG_ZMBV_ENCODER)            += zmbvenc.o
+ 
++OBJS-$(CONFIG_MSC_ENCODER)             += msccoder.o rle.o
++OBJS-$(CONFIG_MSC_DECODER)             += msccoder.o rle.o
++
+ # (AD)PCM decoders/encoders
+ OBJS-$(CONFIG_PCM_ALAW_DECODER)           += pcm.o
+ OBJS-$(CONFIG_PCM_ALAW_ENCODER)           += pcm.o
+diff --git a/libavcodec/allcodecs.c b/libavcodec/allcodecs.c
+index c8a6621..fe21a30 100644
+--- a/libavcodec/allcodecs.c
++++ b/libavcodec/allcodecs.c
+@@ -259,6 +259,7 @@ void avcodec_register_all(void)
+     REGISTER_DECODER (ZEROCODEC, zerocodec);
+     REGISTER_ENCDEC  (ZLIB, zlib);
+     REGISTER_ENCDEC  (ZMBV, zmbv);
++    REGISTER_ENCDEC  (MSC, msc);
+ 
+     /* audio codecs */
+     REGISTER_ENCDEC  (AAC, aac);
+diff --git a/libavcodec/avcodec.h b/libavcodec/avcodec.h
+index c3a5192..a267f2b 100644
+--- a/libavcodec/avcodec.h
++++ b/libavcodec/avcodec.h
+@@ -438,6 +438,7 @@ enum CodecID {
+     CODEC_ID_MPEG4SYSTEMS = 0x20001, /**< _FAKE_ codec to indicate a MPEG-4 Systems
+                                 * stream (only used by libavformat) */
+     CODEC_ID_FFMETADATA = 0x21000,   ///< Dummy codec for streams containing only metadata information.
++    CODEC_ID_MSC,
+ };
+ 
+ #if FF_API_OLD_DECODE_AUDIO
+@@ -2880,6 +2881,10 @@ typedef struct AVCodecContext {
+     int64_t pts_correction_num_faulty_dts; /// Number of incorrect DTS values so far
+     int64_t pts_correction_last_pts;       /// PTS of the last frame
+     int64_t pts_correction_last_dts;       /// DTS of the last frame
++
++    int msc_boolean;
++    float msc_float;
++    int msc_flags;
+ } AVCodecContext;
+ 
+ /**
+diff --git a/libavcodec/msccoder.c b/libavcodec/msccoder.c
+index e69de29..c6cb12d 100644
+--- a/libavcodec/msccoder.c
++++ b/libavcodec/msccoder.c
+@@ -0,0 +1,188 @@
++/*
++ * msccoder.c
++ *
++ *  Created on: Apr 1, 2012
++ *      Author: Stanisław Ogórkis
++ */
++
++#include "msccoder.h"
++#include "rle.h"
++#include "libavutil/log.h"
++
++static int decode_init(AVCodecContext *avctx) {
++	avctx->pix_fmt = PIX_FMT_YUV420P;
++
++	avctx->coded_frame = avcodec_alloc_frame();
++
++	if (!avctx->coded_frame) {
++		av_log(avctx, AV_LOG_ERROR, "Could not allocate frame.\n");
++		return AVERROR(ENOMEM);
++	}
++
++	return 0;
++}
++
++static int decode_close(AVCodecContext *avctx) {
++	if (avctx->coded_frame->data[0])
++		avctx->release_buffer(avctx, avctx->coded_frame);
++
++	av_freep(&avctx->coded_frame);
++
++	return 0;
++}
++
++static int decode(AVCodecContext * avctx, void *outdata, int *outdata_size,	AVPacket *avpkt) {
++	AVFrame *frame = avctx->coded_frame;
++	const uint8_t *src = avpkt->data;
++	int i, j, channelIndex;
++
++	if (frame->data[0]) {
++		avctx->release_buffer(avctx, frame);
++	}
++
++	//	if (avpkt->size < 6 * (avctx->width + 1 >> 1) * (avctx->height + 1 >> 1)) {
++	//		av_log(avctx, AV_LOG_ERROR, "Insufficient input data.\n");
++	//		return AVERROR(EINVAL);
++	//	}
++
++	frame->reference = 0;
++
++	if (avctx->get_buffer(avctx, frame) < 0) {
++		av_log(avctx, AV_LOG_ERROR, "Could not allocate buffer.\n");
++		return AVERROR(ENOMEM);
++	}
++
++	frame->key_frame = 1;
++	frame->pict_type = AV_PICTURE_TYPE_I;
++
++	// RLE decoding
++	for (channelIndex = 0; channelIndex < 3; ++channelIndex) {
++		int height = channelIndex == 0 ? avctx->height : (avctx->height + 1) >> 1;
++		int width = channelIndex == 0 ? avctx->width : (avctx->width + 1) >> 1;
++		int linesize = frame->linesize[channelIndex];
++		for (i = 0; i < height; ++i) {
++			uint8_t * row = frame->data[channelIndex] + linesize * i;
++			uint8_t * rowEnd = row + width;
++
++			while (row < rowEnd) {
++				uint8_t run = *src++;
++				if (run > 0x80) {	// uncompressed
++					run -= 0x80;
++					for (j = 0; j < run; ++j) {
++						*row++ = *src++;
++					}
++				}
++				else {				//compressed
++					uint8_t level = *src++;
++					for (j = 0; j < run; ++j) {
++						*row++ = level;
++					}
++				}
++			}
++		}
++	}
++
++	*outdata_size = sizeof(AVFrame);
++	*(AVFrame *) outdata = *frame;
++
++	return avpkt->size;
++}
++
++static int encode_init(AVCodecContext *avctx) {
++	MscEncoderContext * mscContext;
++
++	av_log(avctx, AV_LOG_INFO, "Property values:\n");
++	av_log(avctx, AV_LOG_INFO, "- msc_bool %d\n", avctx->msc_boolean);
++	av_log(avctx, AV_LOG_INFO, "- msc_float %f\n", avctx->msc_float);
++	av_log(avctx, AV_LOG_INFO, "- msc_custom %d\n", avctx->msc_flags);
++
++	avctx->coded_frame = avcodec_alloc_frame();
++
++	if (!avctx->coded_frame) {
++		av_log(avctx, AV_LOG_ERROR, "Could not allocate frame.\n");
++		return AVERROR(ENOMEM);
++	}
++
++	mscContext = avctx->priv_data;
++	mscContext->buff_size = 6 * avctx->coded_width * avctx->coded_height;
++	mscContext->buff = av_malloc(mscContext->buff_size);
++
++	if (!mscContext->buff) {
++		av_log(avctx, AV_LOG_ERROR, "Could not allocate buffer.\n");
++		return AVERROR(ENOMEM);
++	}
++
++	return 0;
++}
++
++static int encode_close(AVCodecContext *avctx) {
++	MscEncoderContext * mscContext;
++
++	mscContext = avctx->priv_data;
++
++	av_freep(&avctx->coded_frame);
++	av_freep(&mscContext->buff);
++
++	return 0;
++}
++
++static int encode_frame(AVCodecContext *avctx, AVPacket *avpkt,	const AVFrame *frame, int *got_packet_ptr) {
++	MscEncoderContext * mscContext;
++	uint8_t * buff, *endBuff;
++	int ret, i, channelIndex, bytesEncoded;
++
++	mscContext = avctx->priv_data;
++	buff = mscContext->buff;
++	endBuff = mscContext->buff + mscContext->buff_size;
++
++	avctx->coded_frame->reference = 0;
++	avctx->coded_frame->key_frame = 1;
++	avctx->coded_frame->pict_type = AV_PICTURE_TYPE_I;
++
++	// RLE encoding
++	for (channelIndex = 0; channelIndex < 3; ++channelIndex) {
++		int height = channelIndex == 0 ? avctx->height : (avctx->height + 1) >> 1;
++		int width = channelIndex == 0 ? avctx->width : (avctx->width + 1) >> 1;
++		int linesize = frame->linesize[channelIndex];
++		for (i = 0; i < height; i++) {
++			uint8_t * row = frame->data[channelIndex] + linesize * i;
++			if ((bytesEncoded = ff_rle_encode(buff, endBuff - buff - 1, row, 1, width, 0, 0, 0x80, 0)) < 0) {
++				return AVERROR_BUG;
++			}
++			buff += bytesEncoded;
++		}
++	}
++
++	bytesEncoded = (int) (buff - mscContext->buff);
++	if ((ret = ff_alloc_packet2(avctx, avpkt, bytesEncoded)) < 0)
++		return ret;
++
++	avpkt->flags |= AV_PKT_FLAG_KEY;
++	memcpy(avpkt->data, mscContext->buff, bytesEncoded);
++	*got_packet_ptr = 1;
++	return 0;
++}
++
++AVCodec ff_msc_decoder = {
++		.name = "msc",
++		.type = AVMEDIA_TYPE_VIDEO,
++		.id = CODEC_ID_MSC,
++		.priv_data_size = sizeof(MscDecoderContext),
++		.init =	decode_init,
++		.close = decode_close,
++		.decode = decode,
++		.capabilities = CODEC_CAP_DR1,
++		.long_name = NULL_IF_CONFIG_SMALL("Msc coder"),
++};
++
++AVCodec ff_msc_encoder = {
++		.name = "msc",
++		.type = AVMEDIA_TYPE_VIDEO,
++		.id = CODEC_ID_MSC,
++		.priv_data_size = sizeof(MscEncoderContext),
++		.init = encode_init,
++		.close = encode_close,
++		.encode2 = encode_frame,
++		.pix_fmts =	(const enum PixelFormat[]) {PIX_FMT_YUV420P, PIX_FMT_NONE},
++		.long_name = NULL_IF_CONFIG_SMALL("Msc coder"),
++};
+diff --git a/libavcodec/msccoder.h b/libavcodec/msccoder.h
+index e69de29..9942b88 100644
+--- a/libavcodec/msccoder.h
++++ b/libavcodec/msccoder.h
+@@ -0,0 +1,22 @@
++/*
++ * msccoder.h
++ *
++ *  Created on: Apr 1, 2012
++ *      Author: Stanisław Ogórkis
++ */
++
++#ifndef MSCCODER_H_
++#define MSCCODER_H_
++
++#include "avcodec.h"
++#include "internal.h"
++
++typedef struct MscDecoderContext {
++} MscDecoderContext;
++
++typedef struct MscEncoderContext {
++	uint8_t * buff;
++	size_t buff_size;
++} MscEncoderContext;
++
++#endif /* MSCCODER_H_ */
